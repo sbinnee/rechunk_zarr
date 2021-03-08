@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+DESC = """Rechunk zarr format using `dask.array`
+"""
+import sys
+import time
+from typing import Union, List
+from pathlib import Path
+import json
+import math
+from zarr.storage import ContainsArrayError
+from dask import array as da
+from dask.utils import format_bytes
+
+from argparse import ArgumentParser
+from rich.console import Console
+from rich.panel import Panel
+from rich.traceback import install; install()
+
+
+def ask_yes(desc: str):
+    try:
+        ans = input(desc + ' [n/Y]: ')
+    except KeyboardInterrupt:
+        raise KeyboardInterrupt("Abort program")
+    if (ans := ans.strip().upper()) == 'Y':
+        return
+    print('Abort program')
+    exit(1)
+
+def glob_zarray(p_src: Path) -> List[dict]:
+    p_src = Path(p_src).absolute()
+    if not p_src.exists():
+        raise FileNotFoundError(f"Source '{p_src}' does not exist")
+    rich_print(Panel(f"Listing '{p_src}'"))
+    metadata = sorted(p_src.glob('**/.zarray'))
+    lst_zarray = []
+    for p in metadata:
+        p_src_rel = p.relative_to(p_src)
+        rich_print(p_src_rel)
+        with open(p, 'r') as f:
+            data = json.load(f)
+            rich_print(data)
+            lst_zarray.append({
+                'path': p_src_rel.as_posix(),
+                'zarray': data,
+                })
+    return lst_zarray
+
+def rich_print_darr_info(darr: da.Array):
+    rich_print({
+        "Array": {
+            'Bytes': format_bytes(darr.nbytes),
+            'Shape': darr.shape,
+            'Type': darr.dtype,
+            },
+        "Chunk": {
+            'Bytes': format_bytes(math.prod(darr.chunksize)),
+            'Shape': darr.chunksize,
+            'Count': darr.npartitions,
+            },
+        })
+
+if __name__ == '__main__':
+    parser = ArgumentParser(description=DESC)
+    parser.add_argument('--doc', action='store_true',
+            help="Print help for subcommand 'run' arguments, help(dask.array.rechunk)")
+    parser.add_argument('-l', '--list', type=str, metavar='[FILE]',
+            help="List zarr file")
+    # subcommand 'run'
+    subparsers = parser.add_subparsers(title="subcommands", dest="subcommand")
+    parser_run = subparsers.add_parser("run",
+            help="Run the script")
+    parser_run.add_argument('source', type=str, metavar='source [FILE]',
+            help="Path to source zarr file")
+    parser_run.add_argument('target', type=str, nargs='?', metavar='target [FILE]',
+            help="""Path to destination zarr file, if `overwrite` is set, not
+            required""")
+    parser_run.add_argument('--overwrite', action='store_true',
+            help="""If set and `target` is not set, it will overwrite the source
+            array""")
+    parser_run.add_argument('--component', type=int, metavar='INT', default=0,
+            help="Select component, default is '0'")
+    parser_run.add_argument('--chunks', type=int, nargs=5, action='extend', metavar='INT',
+            help="""XYZCT order.  dask.array.rechunk: The new block dimensions
+            to create. -1 indicates the full size of the corresponding
+            dimension. Default is "auto" which automatically determines chunk
+            sizes.""")
+    parser_run.add_argument('--threshold', type=int, metavar='INT',
+            help="""The graph growth factor under which we don't bother
+            introducing an intermediate step.""")
+    parser_run.add_argument('--block-size-limit', type=int, metavar='INT',
+            help="""The maximum block size (in bytes) we want to produce
+            Defaults to the configuration value ``array.chunk-size`` """)
+    parser_run.add_argument('--balance', action='store_true',
+            help="""If set, try to make each chunk to be the same size.""")
+
+    args = parser.parse_args()
+
+
+    # Pretty rich print
+    console = Console()
+    rich_print = console.print
+
+    # --doc
+    if args.doc:
+        rich_print(Panel("help(dask.array.rechunk)"))
+        rich_print("See also `rechunk_zarr run --help`")
+        rich_print(da.rechunk.__doc__)
+        sys.exit(0)
+
+    # -l, --list
+    if p_src := args.list:
+        _ = glob_zarray(p_src)
+        sys.exit(0)
+
+
+    p_src = Path(args.source).absolute()
+    if not args.target:
+        assert args.overwrite, "If you want to overwrite the source, use `--overwrite"
+        p_dst = p_src
+    else:
+        p_dst = Path(args.target).absolute()
+
+    if not p_src.exists():
+        raise FileNotFoundError(f"Source '{p_src}' does not exist")
+
+    metadata = glob_zarray(p_src)
+
+    # # Load zarr
+    meta = metadata[args.component]
+    # rich_print('[bold]Selected[/]:', f"[underline]{meta['path']}[/]")
+    p_sub = (p_src / meta['path']).parent
+    # rich_print(Panel(f"Loading '{p_sub}'"))
+    rich_print(Panel(str(p_sub), title="Source"))
+    darr = da.from_zarr(p_sub.as_posix())
+    rich_print('[bold]Before rechunking[/]')
+    rich_print_darr_info(darr)
+
+    # Handle `rechunks` arguments
+    args_rechunks = {
+            'chunks': tuple(args.chunks) if args.chunks else 'auto',
+            'threshold': args.threshold,
+            'block_size_limit': args.block_size_limit,
+            'balance': args.balance,
+            }
+
+    rich_print('[bold]Rechunk arguments: [/]', args_rechunks)
+
+    darr_rechunked = darr.rechunk(**args_rechunks)
+    rich_print('[bold]After rechunking[/]')
+    rich_print_darr_info(darr_rechunked)
+
+    rich_print(Panel(str(p_dst), title="Target"))
+    ask_yes("Rechunk?")
+    if args.overwrite and not args.target:
+        ask_yes("Overwrite?")
+    print('RUNNING...')
+    try:
+        t0 = time.perf_counter()
+        darr.to_zarr(p_dst.as_posix(), overwrite=args.overwrite, return_stored=False)
+        t1 = time.perf_counter()
+        rich_print(f'[green]Took {t1-t0:.0f} seconds[/]')
+    except ContainsArrayError:
+        rich_print('[red]Use `--overwrite` option to override the existing array[/]')
