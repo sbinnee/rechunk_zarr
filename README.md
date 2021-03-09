@@ -27,3 +27,6 @@ rechunk_zarr run --help
 - dask
 - rich
 	For pretty printing
+
+## Links
+- rechunker: https://github.com/pangeo-data/rechunker
