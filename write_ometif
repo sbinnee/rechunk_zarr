@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+DESC = """Load tiff files and make a single OME TIFF file.
+"""
+
+import sys
+import os
+import subprocess
+from argparse import ArgumentParser
+
+import tifffile
+
+from rich.console import Console
+from rich.traceback import install; install()
+
+def ask_yes(desc: str):
+    try:
+        ans = input(desc + ' [n/Y]: ')
+    except KeyboardInterrupt:
+        raise KeyboardInterrupt("Abort program")
+    if (ans := ans.strip().upper()) == 'Y':
+        return
+    print('Abort program')
+    exit(1)
+
+if __name__ == '__main__':
+    parser = ArgumentParser(description=DESC)
+    parser.add_argument('-l', '--list', type=str, nargs='+',
+            metavar='source(s) [FILE...]',
+            help="Print shape and dtype of given FILE(s). str, path-like, "
+            "binary stream, or sequence File name, seekable binary stream, "
+            "glob pattern, or sequence of file names.")
+
+    subparsers = parser.add_subparsers(title="subcommands", dest="subcommand")
+    write_parser = subparsers.add_parser("write", help="Write")
+    write_parser.add_argument('source', type=str, nargs='+',
+            metavar='source(s) [FILE...]',
+            help="str, path-like, binary stream, or sequence File name, "
+            "seekable binary stream, glob pattern, or sequence of file names.")
+    write_parser.add_argument('target', type=str,
+            metavar='target [FILE]',
+            help="str, path-like, binary stream, or FileHandle File name or "
+            "writable binary stream, such as an open file or BytesIO.")
+    # write_parser.add_argument('--bigtiff', action='store_true', default=None,
+    #         help="Write target as bigtiff")
+
+    args = parser.parse_args()
+
+
+    if args.list:
+        for p in args.list:
+            tif = tifffile.imread(p)
+            du = subprocess.run(['du', '-sh', p], capture_output=True)
+            print(du.stdout.decode(), end='')
+            print(f"  shape={tif.shape}")
+            print(f"  dtype={tif.dtype}")
+        sys.exit(0)
+
+    if (s:= args.target).endswith('.ome.tif'):
+        # print('Ends with ome.tif')
+        pass
+    elif s.endswith('.ome.tiff'):
+        # print('Ends with ome.tiff')
+        pass
+    else:
+        dest = s + '.ome.tif'
+        ask_yes(f"Target path '{dest}'")
+
+    tif = tifffile.imread(args.source)
+    numfmt = subprocess.run(['numfmt', '--to=iec', str(tif.nbytes)], capture_output=True)
+    print(tif.shape, tif.dtype, numfmt.stdout.decode(), end='')
+
+    ask_yes(f"Write to '{args.target}'")
+
+    with tifffile.TiffWriter(
+            args.target,
+            bigtiff=True,
+            ome=True,
+            ) as writer:
+        writer.write(data=tif)
